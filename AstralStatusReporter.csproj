@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net6.0-windows</TargetFramework>
     <!-- 目标框架 -->
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     <!-- 输出类型：Exe=控制台，Library=类库，WinExe=Windows窗体 -->
     <AssemblyName>AstralStatusReporter</AssemblyName>
     <!-- 项目名称/程序集名称 -->
@@ -29,6 +29,18 @@
     <!-- 添加本地库 -->
     <PublishTrimmed>false</PublishTrimmed>
     <!-- 裁剪无用代码 -->
+
+      <!-- 发布时移除调试符号，减小体积 -->
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  
+    <!-- 禁用生成.pdb文件 -->
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+  
+    <!-- 程序集信息 -->
+    <Company>Astral</Company>
+    <Product>Astral Status Reporter</Product>
+    <Copyright>Copyright © llz12 2026</Copyright>
   </PropertyGroup>
 
   <ItemGroup>

@@ -69,8 +69,12 @@ namespace AstralStatusReporter
         [STAThread]
         public static void Main(string[] args)
         {
-            // 控制台窗口处理：DLL模式显示，EXE模式隐藏
-            if (!IsDllMode())
+            // 判断运行模式：开发模式显示控制台，生产模式隐藏
+            bool isDevelopment = Debugger.IsAttached ||
+                                 args.Contains("--debug") ||
+                                 args.Contains("-d");
+
+            if (!isDevelopment)
             {
                 HideConsoleWindow();
             }
@@ -193,14 +197,7 @@ namespace AstralStatusReporter
             }
         }
 
-        // 判断是否为DLL模式
-        private static bool IsDllMode()
-        {
-            var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-            return assembly.ManifestModule.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
-        }
-
-        // 隐藏控制台窗口（仅EXE模式）
+        // 隐藏控制台窗口
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetConsoleWindow();
 
