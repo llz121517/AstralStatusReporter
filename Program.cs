@@ -1,5 +1,6 @@
 ﻿using Microsoft.Win32;
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -22,6 +23,9 @@ namespace AstralStatusReporter
 
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     }
 
     // 配置类
@@ -39,20 +43,22 @@ namespace AstralStatusReporter
         public string ProcessName { get; set; }
         public string ProcessRealName { get; set; }
         public string Description { get; set; }
+        public string WindowClass { get; set; }
         public string Error { get; set; }
     }
 
     // 上报数据类
     public class ReportPayload
     {
-        public string Hostname { get; set; }
-        public string WindowTitle { get; set; }
-        public long Timestamp { get; set; }
-        public string Status { get; set; } = "online";
-        public string Error { get; set; }
-        public string ProcessName { get; set; }
-        public string ProcessRealName { get; set; }
-        public string Description { get; set; }
+        public string hostname { get; set; }
+        public long timestamp { get; set; }
+        public string status { get; set; } = "online";
+        public string windowTitle { get; set; }
+        public string windowClass { get; set; }
+        public string processName { get; set; }
+        public string processRealName { get; set; }
+        public string description { get; set; }
+        public string error { get; set; }
     }
 
     // 主程序
@@ -87,114 +93,163 @@ namespace AstralStatusReporter
             // 初始化路径
             _scriptDir = AppDomain.CurrentDomain.BaseDirectory;
 
-            // 加载配置
-            LoadConfig();
+            // 配置加载错误将被捕获并记录
+            try
+            {
+                LoadConfig();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WARN  配置加载异常: {ex.Message}");
+                _config = new Config(); // 使用默认配置
+            }
 
-            // 加载AES密钥
-            LoadAesKey();
+            // AES密钥加载错误将被捕获并记录
+            try
+            {
+                LoadAesKey();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WARN  AES密钥加载异常: {ex.Message}");
+                _aesKey = null;
+            }
 
-            // 设置自启
-            _initialError = SetAutorun();
+            // 自启动设置错误被捕获并存储
+            try
+            {
+                _initialError = SetAutorun();
+            }
+            catch (Exception ex)
+            {
+                _initialError = $"自启动设置异常: {ex.Message}";
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ERROR {_initialError}");
+            }
 
             // 初始化HTTP客户端
             _httpClient = new HttpClient();
 
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] INFO  当前上报间隔时间: {_config.SleepInterval} 秒");
 
-            // 无限循环上报
-            while (true)
+            try
             {
-                string windowTitle = null;
-                string runtimeError = null;
+                // 无限循环上报
+                while (true)
+                {
+                    string windowTitle = null;
+                    string windowClass = null;
+                    string runtimeError = null;
 
-                // 获取窗口标题
-                try
-                {
-                    windowTitle = GetActiveWindowTitle();
-                }
-                catch (Exception ex)
-                {
-                    runtimeError = ex.Message;
-                }
-
-                // 获取进程信息
-                var procInfo = GetFocusProcessInfo();
-                if (!string.IsNullOrEmpty(procInfo.Error))
-                {
-                    if (!string.IsNullOrEmpty(runtimeError))
+                    // 窗口信息获取错误被捕获并记录
+                    try
                     {
-                        runtimeError += "; " + procInfo.Error;
+                        var windowInfo = GetActiveWindowInfo();
+                        windowTitle = windowInfo.Item1;
+                        windowClass = windowInfo.Item2;
+                    }
+                    catch (Exception ex)
+                    {
+                        runtimeError = $"窗口信息获取失败: {ex.Message}";
+                    }
+
+                    // 进程信息获取错误被捕获并记录
+                    ProcessInfo procInfo;
+                    try
+                    {
+                        procInfo = GetFocusProcessInfo();
+                        if (!string.IsNullOrEmpty(procInfo.Error))
+                        {
+                            runtimeError = AppendError(runtimeError, procInfo.Error);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        procInfo = new ProcessInfo();
+                        runtimeError = AppendError(runtimeError, $"进程信息异常: {ex.Message}");
+                    }
+
+                    // 确保所有非致命错误都被包含
+                    string reportError = null;
+                    if (!string.IsNullOrEmpty(_initialError) && !_autorunWarnReported)
+                    {
+                        reportError = _initialError;
+                        _autorunWarnReported = true;
                     }
                     else
                     {
-                        runtimeError = procInfo.Error;
+                        reportError = runtimeError;
                     }
-                }
 
-                // 错误上报逻辑
-                string reportError = null;
-                if (!string.IsNullOrEmpty(_initialError) && !_autorunWarnReported)
-                {
-                    reportError = _initialError;
-                    _autorunWarnReported = true;
-                }
-                else
-                {
-                    reportError = runtimeError;
-                }
-
-                // 构建JSON payload
-                var payload = new ReportPayload
-                {
-                    Hostname = Environment.MachineName,
-                    WindowTitle = windowTitle,
-                    Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
-                    Status = "online",
-                    Error = reportError,
-                    ProcessName = procInfo.ProcessName,
-                    ProcessRealName = procInfo.ProcessRealName,
-                    Description = procInfo.Description
-                };
-
-                string jsonBody = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
-
-                // 加密
-                string encryptedBody = ProtectJsonAes(jsonBody);
-                if (string.IsNullOrEmpty(encryptedBody))
-                {
-                    if (!_encryptFailedOnce)
+                    // 构建JSON payload
+                    var payload = new ReportPayload
                     {
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] FAIL 首次加密失败，后续将不再重复告警");
-                        _encryptFailedOnce = true;
+                        hostname = Environment.MachineName,
+                        timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
+                        status = "online",
+                        windowTitle = windowTitle,
+                        windowClass = windowClass,
+                        processName = procInfo.ProcessName,
+                        processRealName = procInfo.ProcessRealName,
+                        description = procInfo.Description,
+                        error = reportError  // 所有非致命错误上报字段
+                    };
+
+                    string jsonBody = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+
+                    // 加密失败 - 无法通信，只打印控制台
+                    string encryptedBody = ProtectJsonAes(jsonBody);
+                    if (string.IsNullOrEmpty(encryptedBody))
+                    {
+                        if (!_encryptFailedOnce)
+                        {
+                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] FAIL 首次加密失败，后续将不再重复告警");
+                            _encryptFailedOnce = true;
+                        }
+                        System.Threading.Thread.Sleep(_config.SleepInterval * 1000);
+                        continue;  // 跳过本次上报
                     }
+
+                    // 网络请求失败 - 无法通信，只打印控制台
+                    try
+                    {
+                        var content = new StringContent(encryptedBody, Encoding.UTF8, "text/plain");
+                        var response = _httpClient.PostAsync(_config.ApiEndpoint, content).Result;
+                        response.EnsureSuccessStatusCode();
+
+                        string displayTitle = !string.IsNullOrEmpty(windowTitle) ? windowTitle : "NULL";
+                        string displayClass = !string.IsNullOrEmpty(windowClass) ? windowClass : "NULL";
+                        string displayErr = !string.IsNullOrEmpty(reportError) ? reportError : "None";
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Okay! 窗口: {displayTitle} | 类名: {displayClass} | 错误: {displayErr}");
+
+                        string displayProcName = !string.IsNullOrEmpty(procInfo.ProcessName) ? procInfo.ProcessName : "NULL";
+                        string displayProcReal = !string.IsNullOrEmpty(procInfo.ProcessRealName) ? procInfo.ProcessRealName : "NULL";
+                        string displayDesc = !string.IsNullOrEmpty(procInfo.Description) ? procInfo.Description : "NULL";
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Okay! 进程: {displayProcName} | {displayProcReal} | {displayDesc}");
+                        Console.WriteLine();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] FAIL 网络请求失败: {ex.Message}");
+                        // 继续下一次循环
+                    }
+
                     System.Threading.Thread.Sleep(_config.SleepInterval * 1000);
-                    continue;
                 }
-
-                // 发送
-                try
-                {
-                    var content = new StringContent(encryptedBody, Encoding.UTF8, "text/plain");
-                    var response = _httpClient.PostAsync(_config.ApiEndpoint, content).Result;
-                    response.EnsureSuccessStatusCode();
-
-                    string displayTitle = !string.IsNullOrEmpty(windowTitle) ? windowTitle : "NULL";
-                    string displayErr = !string.IsNullOrEmpty(reportError) ? reportError : "None";
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Okay! 窗口: {displayTitle} | 错误: {displayErr}");
-
-                    string displayProcName = !string.IsNullOrEmpty(procInfo.ProcessName) ? procInfo.ProcessName : "NULL";
-                    string displayProcReal = !string.IsNullOrEmpty(procInfo.ProcessRealName) ? procInfo.ProcessRealName : "NULL";
-                    string displayDesc = !string.IsNullOrEmpty(procInfo.Description) ? procInfo.Description : "NULL";
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Okay! 进程: {displayProcName} | {displayProcReal} | {displayDesc}");
-                    Console.WriteLine();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] FAIL 上报失败: {ex.Message}");
-                }
-
-                System.Threading.Thread.Sleep(_config.SleepInterval * 1000);
             }
+            finally
+            {
+                // 释放 HttpClient 资源
+                _httpClient?.Dispose();
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] INFO  程序退出，资源已释放");
+            }
+        }
+
+        // 追加错误信息
+        private static string AppendError(string existing, string newError)
+        {
+            if (string.IsNullOrEmpty(existing))
+                return newError;
+            return $"{existing}; {newError}";
         }
 
         // 隐藏控制台窗口
@@ -216,6 +271,159 @@ namespace AstralStatusReporter
             }
         }
 
+        // 获取当前活动窗口标题和类名
+        private static Tuple<string, string> GetActiveWindowInfo()
+        {
+            IntPtr hwnd = Win32.GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+            {
+                return Tuple.Create<string, string>(null, null);
+            }
+
+            string title = null;
+            string className = null;
+
+            try
+            {
+                // 分别捕获标题和类名的错误
+                var titleSb = new StringBuilder(256);
+                int titleLen = Win32.GetWindowText(hwnd, titleSb, titleSb.Capacity);
+                if (titleLen > 0)
+                {
+                    title = titleSb.ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"窗口标题获取失败: {ex.Message}");
+            }
+
+            try
+            {
+                var classSb = new StringBuilder(256);
+                int classLen = Win32.GetClassName(hwnd, classSb, classSb.Capacity);
+                if (classLen > 0)
+                {
+                    className = classSb.ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"窗口类名获取失败: {ex.Message}");
+            }
+
+            return Tuple.Create(title, className);
+        }
+
+        // 获取当前进程信息
+        private static ProcessInfo GetFocusProcessInfo()
+        {
+            IntPtr hwnd = Win32.GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+            {
+                return new ProcessInfo
+                {
+                    ProcessName = null,
+                    ProcessRealName = null,
+                    Description = null,
+                    WindowClass = null,
+                    Error = null
+                };
+            }
+
+            uint focusPid = 0;
+            Win32.GetWindowThreadProcessId(hwnd, out focusPid);
+
+            if (focusPid == 0)
+            {
+                return new ProcessInfo
+                {
+                    ProcessName = null,
+                    ProcessRealName = null,
+                    Description = null,
+                    WindowClass = null,
+                    Error = null
+                };
+            }
+
+            try
+            {
+                using (var proc = Process.GetProcessById((int)focusPid))
+                {
+                    string name = proc.ProcessName;
+                    string realName = proc.ProcessName;
+                    string desc = null;
+                    string winClass = null;
+                    string error = null;
+
+                    // MainModule 可能为 null
+                    if (proc.MainModule != null)
+                    {
+                        try
+                        {
+                            if (proc.MainModule.FileVersionInfo != null &&
+                                !string.IsNullOrWhiteSpace(proc.MainModule.FileVersionInfo.FileDescription))
+                            {
+                                desc = proc.MainModule.FileVersionInfo.FileDescription;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            error = AppendError(error, $"文件描述获取失败: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        error = AppendError(error, "MainModule 为空");
+                    }
+
+                    // 分别捕获窗口类名的错误
+                    try
+                    {
+                        var classSb = new StringBuilder(256);
+                        int classLen = Win32.GetClassName(hwnd, classSb, classSb.Capacity);
+                        if (classLen > 0)
+                        {
+                            winClass = classSb.ToString();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        error = AppendError(error, $"窗口类名获取失败: {ex.Message}");
+                    }
+
+                    return new ProcessInfo
+                    {
+                        ProcessName = name,
+                        ProcessRealName = realName,
+                        Description = desc,
+                        WindowClass = winClass,
+                        Error = error
+                    };
+                }
+            }
+            catch (ArgumentException)
+            {
+                // 进程不存在
+                return new ProcessInfo { Error = "进程不存在" };
+            }
+            catch (InvalidOperationException)
+            {
+                // 进程已退出
+                return new ProcessInfo { Error = "进程已退出" };
+            }
+            catch (Win32Exception ex)
+            {
+                // 访问权限问题
+                return new ProcessInfo { Error = $"进程访问失败: {ex.Message}" };
+            }
+            catch (Exception ex)
+            {
+                // 其他异常
+                return new ProcessInfo { Error = $"进程信息获取失败: {ex.Message}" };
+            }
+        }
+
         // 加载INI配置
         private static void LoadConfig()
         {
@@ -224,45 +432,51 @@ namespace AstralStatusReporter
 
             if (!File.Exists(iniPath))
             {
-                // 生成默认配置文件
                 GenerateDefaultConfig(iniPath);
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] INFO  配置文件不存在，已生成默认配置: {iniPath}");
+                return;
             }
 
-            // 读取INI文件
-            var lines = File.ReadAllLines(iniPath);
-            foreach (var line in lines)
+            try
             {
-                var trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#") || trimmed.StartsWith(";"))
-                    continue;
-
-                var parts = trimmed.Split(new[] { '=' }, 2);
-                if (parts.Length != 2)
-                    continue;
-
-                var key = parts[0].Trim();
-                var value = parts[1].Trim();
-
-                switch (key.ToLower())
+                var lines = File.ReadAllLines(iniPath);
+                foreach (var line in lines)
                 {
-                    case "apiendpoint":
-                        _config.ApiEndpoint = value;
-                        break;
-                    case "sleepinterval":
-                        if (int.TryParse(value, out int interval))
-                            _config.SleepInterval = interval;
-                        break;
-                    case "autorunname":
-                        _config.AutorunName = value;
-                        break;
-                    case "envaeskeyname":
-                        _config.EnvAesKeyName = value;
-                        break;
-                }
-            }
+                    var trimmed = line.Trim();
+                    if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#") || trimmed.StartsWith(";"))
+                        continue;
 
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] INFO  配置加载完成");
+                    var parts = trimmed.Split(new[] { '=' }, 2);
+                    if (parts.Length != 2)
+                        continue;
+
+                    var key = parts[0].Trim();
+                    var value = parts[1].Trim();
+
+                    switch (key.ToLower())
+                    {
+                        case "apiendpoint":
+                            _config.ApiEndpoint = value;
+                            break;
+                        case "sleepinterval":
+                            if (int.TryParse(value, out int interval))
+                                _config.SleepInterval = interval;
+                            break;
+                        case "autorunname":
+                            _config.AutorunName = value;
+                            break;
+                        case "envaeskeyname":
+                            _config.EnvAesKeyName = value;
+                            break;
+                    }
+                }
+
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] INFO  配置加载完成");
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"配置文件读取失败: {ex.Message}");
+            }
         }
 
         // 生成默认配置文件
@@ -293,7 +507,12 @@ namespace AstralStatusReporter
             var envVars = new Dictionary<string, string>();
             string envPath = Path.Combine(_scriptDir, ".env");
 
-            if (File.Exists(envPath))
+            if (!File.Exists(envPath))
+            {
+                return envVars;
+            }
+
+            try
             {
                 var lines = File.ReadAllLines(envPath);
                 foreach (var line in lines)
@@ -310,6 +529,10 @@ namespace AstralStatusReporter
                     var value = parts[1].Trim();
                     envVars[key] = value;
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WARN  .env文件读取失败: {ex.Message}");
             }
 
             return envVars;
@@ -351,7 +574,6 @@ namespace AstralStatusReporter
                 {
                     if (key == null)
                     {
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ERROR  无法打开注册表");
                         return "无法打开注册表";
                     }
 
@@ -377,105 +599,7 @@ namespace AstralStatusReporter
             }
             catch (Exception ex)
             {
-                string errorMsg = $"自启设置失败: {ex.Message}";
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ERROR {errorMsg}");
-                return errorMsg;
-            }
-        }
-
-        // 获取当前活动窗口标题
-        private static string GetActiveWindowTitle()
-        {
-            try
-            {
-                var sb = new StringBuilder(256);
-                IntPtr hwnd = Win32.GetForegroundWindow();
-                int len = Win32.GetWindowText(hwnd, sb, sb.Capacity);
-
-                if (len > 0)
-                {
-                    string title = sb.ToString();
-                    if (!string.IsNullOrWhiteSpace(title))
-                    {
-                        return title;
-                    }
-                }
-            }
-            catch
-            {
-                // 忽略异常
-            }
-
-            return null;
-        }
-
-        // 获取当前进程信息
-        private static ProcessInfo GetFocusProcessInfo()
-        {
-            try
-            {
-                IntPtr hwnd = Win32.GetForegroundWindow();
-                if (hwnd == IntPtr.Zero)
-                {
-                    return new ProcessInfo
-                    {
-                        ProcessName = null,
-                        ProcessRealName = null,
-                        Description = null,
-                        Error = null
-                    };
-                }
-
-                uint focusPid = 0;
-                Win32.GetWindowThreadProcessId(hwnd, out focusPid);
-
-                if (focusPid == 0)
-                {
-                    return new ProcessInfo
-                    {
-                        ProcessName = null,
-                        ProcessRealName = null,
-                        Description = null,
-                        Error = null
-                    };
-                }
-
-                var proc = Process.GetProcessById((int)focusPid);
-
-                string name = proc.ProcessName;
-                string realName = proc.ProcessName;
-                string desc = null;
-
-                // 优先使用 Description
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(proc.MainModule.FileVersionInfo.FileDescription))
-                    {
-                        desc = proc.MainModule.FileVersionInfo.FileDescription;
-                    }
-                }
-                catch
-                {
-                    // 忽略异常
-                }
-
-                return new ProcessInfo
-                {
-                    ProcessName = name,
-                    ProcessRealName = realName,
-                    Description = desc,
-                    Error = null
-                };
-            }
-            catch (Exception ex)
-            {
-                return new ProcessInfo
-                {
-                    ProcessName = null,
-                    ProcessRealName = null,
-                    Description = null,
-                    Error = $"进程信息获取失败: {ex.Message}"
-                };
+                return $"自启设置失败: {ex.Message}";
             }
         }
 
