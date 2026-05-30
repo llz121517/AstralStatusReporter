@@ -567,7 +567,7 @@ namespace AstralStatusReporter
             try
             {
                 string registryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-                string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                string exePath = Environment.ProcessPath;
                 string expectedCommand = $"\"{exePath}\"";
 
                 using (var key = Registry.CurrentUser.OpenSubKey(registryPath, true))
