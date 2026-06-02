@@ -127,3 +127,9 @@ AstralStatusReporter/
 ├── .env                       # 可选：AES 密钥
 └── README.md
 ```
+
+### 贡献
+欢迎提交 Pull Request 或 Issues 讨论改进建议。
+
+### 许可证
+[Apache-2.0 License](LICENSE)

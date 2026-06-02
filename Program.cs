@@ -1,4 +1,6 @@
-﻿using Microsoft.Win32;
+﻿// Copyright (c) 2026 llz121517
+// Licensed under the Apache License, Version 2.0
+using Microsoft.Win32;
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
