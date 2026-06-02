@@ -54,8 +54,8 @@ namespace AstralStatusReporter
     {
         public string hostname { get; set; }
         public long timestamp { get; set; }
-        public string status { get; set; } = "online";
         public int interval { get; set; }
+        public string status { get; set; } = "online";
         public string windowTitle { get; set; }
         public string windowClass { get; set; }
         public string processName { get; set; }
